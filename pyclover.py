@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 """
-clover_net_sales.py  – Version 2
+clover_net_sales.py  – Version 3
 --------------------------------
-• Net‑sales report between 12 p.m. and 12 a.m. Central Time
-  -r {today,yesterday,week,month}   (default: today)
+• Net‑metrics between 12 p.m. and 12 a.m. Central Time
+  -r {today,yesterday,week,month}     (default: today)
+  -q {sales,tax,tips}                 (default: sales)
 
 • Quick listings
   -l {employees,discounts,items}
 
-CONFIG  – ./config.json (same as before)
+CONFIG  – ./config.json
+
 {
   "merchant_id": "YOUR_13_CHAR_MID",
   "access_token": "YOUR_PRIVATE_TOKEN",
   "base_url": "https://api.clover.com"
 }
 """
-
 import argparse, json, sys
 from pathlib import Path
 from datetime import datetime, time, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 import requests
 
-# ── constants ──────────────────────────────────────────────────────────────
+# Constants
 CONFIG_FILE = Path(__file__).with_name("config.json")
 PAGE_LIMIT  = 1000
 CENTRAL_TZ  = ZoneInfo("America/Chicago")
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# Helpers
+
 def load_cfg(path: Path) -> dict:
     if not path.exists():
         sys.exit(f"❌  Config file {path} not found.")
@@ -40,23 +42,19 @@ def sunday_of_week(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 def window(range_key: str):
-    today = datetime.now(CENTRAL_TZ).date()
-
+    now_ct = datetime.now(CENTRAL_TZ)
+    today  = now_ct.date()
     if range_key == "today":
         s = e = today
     elif range_key == "yesterday":
         s = e = today - timedelta(days=1)
     elif range_key == "week":
-        s = sunday_of_week(today)
-        first = today.replace(day=1)
-        if s < first:
-            s = first
+        s = max(sunday_of_week(today), today.replace(day=1))
         e = today
     elif range_key == "month":
         s, e = today.replace(day=1), today
     else:
-        sys.exit("❌  Range must be: today, yesterday, week, month")
-
+        sys.exit(f"❌  Unknown range '{range_key}'.")
     start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
     end_dt   = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
     return epoch_ms(start_dt), epoch_ms(end_dt), s, e
@@ -77,73 +75,81 @@ def paged_get(cfg: dict, path: str) -> list[dict]:
         offset += PAGE_LIMIT
     return out
 
-# ── net‑sales logic ────────────────────────────────────────────────────────
+# Data fetch
+
 def get_payments(cfg, start_ms, end_ms):
     mid = cfg["merchant_id"]
     path = (f"/v3/merchants/{mid}/payments"
-            f"?filter=createdTime>{start_ms}"
-            f"&filter=createdTime<{end_ms}"
-            f"&filter=result=SUCCESS"
-            f"&filter=voided=false"
-            f"&expand=refunds")
+           f"?filter=createdTime>{start_ms}"
+           f"&filter=createdTime<{end_ms}"
+           f"&filter=result=SUCCESS"
+           f"&filter=voided=false"
+           f"&expand=refunds")
     return paged_get(cfg, path)
 
-def net_sales_cents(payments):
+# Metrics
+
+def net_sales_cents(payments: list[dict]) -> int:
     gross = sum(p.get("amount", 0) for p in payments)
-    refunds = sum(r.get("amount", 0)
+    refunds = sum(ref.get("amount", 0)
                   for p in payments
-                  for r in (p.get("refunds", {}).get("elements", []) if p.get("refunds") else []))
+                  for ref in (p.get("refunds", {}).get("elements", []) if p.get("refunds") else []))
     return gross - refunds
 
-def print_net_sales(cfg, range_key):
-    start_ms, end_ms, sd, ed = window(range_key)
-    cents = net_sales_cents(get_payments(cfg, start_ms, end_ms))
-    label = sd.strftime("%Y‑%m‑%d") if sd == ed else f"{sd:%Y‑%m‑%d} → {ed:%Y‑%m‑%d}"
-    print(f"Net sales (12 p.m.–midnight CT) for {label}: ${cents/100:,.2f}")
+def total_tax_cents(payments: list[dict]) -> int:
+    return sum(p.get("taxAmount", 0) for p in payments)
 
-# ── listing logic ──────────────────────────────────────────────────────────
-def list_resource(cfg, resource):
+def total_tips_cents(payments: list[dict]) -> int:
+    return sum(p.get("tipAmount", 0) for p in payments)
+
+# Listings
+
+def list_resource(cfg: dict, resource: str) -> None:
     mid = cfg["merchant_id"]
     if resource == "employees":
-        path = f"/v3/merchants/{mid}/employees?"
-        key  = "name"
+        path, key = f"/v3/merchants/{mid}/employees?", "name"
     elif resource == "discounts":
-        path = f"/v3/merchants/{mid}/discounts?"
-        key  = "name"
+        path, key = f"/v3/merchants/{mid}/discounts?", "name"
     elif resource == "items":
-        path = f"/v3/merchants/{mid}/items?"
-        key  = "name"
+        path, key = f"/v3/merchants/{mid}/items?", "name"
     else:
         sys.exit("❌  List option must be: employees, discounts, items")
-
     rows = paged_get(cfg, path)
-    if not rows:
-        print(f"(no {resource} found)")
-        return
-
     print(f"{resource.capitalize()} ({len(rows)}):")
     for r in rows:
-        print(f"• {r.get(key, '(no name)')}   [{r.get('id')}]")
+        print(f"• {r.get(key)}   [{r.get('id')}]")
 
-# ── main ───────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser(description="Clover net‑sales & listing tool")
-    group = ap.add_mutually_exclusive_group()
-    group.add_argument("-r", "--range",
-                       choices=["today", "yesterday", "week", "month"],
-                       default="today",
-                       help="Date range for net‑sales (default: today)")
+# Main
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Clover metrics & listing tool")
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("-l", "--list",
-                       choices=["employees", "discounts", "items"],
-                       help="List Clover resources and exit")
-    args = ap.parse_args()
-
+                       choices=["employees","discounts","items"],
+                       help="List resources and exit")
+    parser.add_argument("-r", "--range",
+                        choices=["today","yesterday","week","month"],
+                        default="today",
+                        help="Date range for net-sales (default: today)")
+    parser.add_argument("-q","--query",
+                        choices=["sales","tax","tips"],
+                        default="sales",
+                        help="Metric to calculate (default: sales)")
+    args = parser.parse_args()
     cfg = load_cfg(CONFIG_FILE)
-
     if args.list:
-        list_resource(cfg, args.list)
+        list_resource(cfg,args.list)
+        return
+    start_ms, end_ms, sd, ed = window(args.range)
+    payments = get_payments(cfg, start_ms, end_ms)
+    if args.query=="sales":
+        cents,label=net_sales_cents(payments),"Net sales"
+    elif args.query=="tax":
+        cents,label=total_tax_cents(payments),"Total tax"
     else:
-        print_net_sales(cfg, args.range)
+        cents,label=total_tips_cents(payments),"Total tips"
+    label_date = sd.strftime("%Y-%m-%d") if sd == ed else f"{sd:%Y-%m-%d} → {ed:%Y-%m-%d}"
+    print(f"{label} (12 p.m.–midnight CT) for {label_date}: ${cents/100:,.2f}")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
