@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-clover_net_sales.py  – Version 3
---------------------------------
-• Net‑metrics between 12 p.m. and 12 a.m. Central Time
+clover_net_sales.py  – Version 3 (discount endpoint fix, positive display)
+-----------------------------------------------------------------------
+• Net-metrics between 12 p.m. and 12 a.m. Central Time
   -r {today,yesterday,week,month}     (default: today)
-  -q {sales,tax,tips}                 (default: sales)
+  -q {sales,tax,tips,discounts}       (default: sales)
 
 • Quick listings
   -l {employees,discounts,items}
 
-CONFIG  – ./config.json
+CONFIG  – ./config.json
 
 {
   "merchant_id": "YOUR_13_CHAR_MID",
@@ -42,8 +42,7 @@ def sunday_of_week(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 def window(range_key: str):
-    now_ct = datetime.now(CENTRAL_TZ)
-    today  = now_ct.date()
+    today = datetime.now(CENTRAL_TZ).date()
     if range_key == "today":
         s = e = today
     elif range_key == "yesterday":
@@ -75,16 +74,31 @@ def paged_get(cfg: dict, path: str) -> list[dict]:
         offset += PAGE_LIMIT
     return out
 
-# Data fetch
+# Data fetch for payments
 
 def get_payments(cfg, start_ms, end_ms):
     mid = cfg["merchant_id"]
-    path = (f"/v3/merchants/{mid}/payments"
-           f"?filter=createdTime>{start_ms}"
-           f"&filter=createdTime<{end_ms}"
-           f"&filter=result=SUCCESS"
-           f"&filter=voided=false"
-           f"&expand=refunds")
+    path = (
+        f"/v3/merchants/{mid}/payments"
+        f"?filter=createdTime>{start_ms}"
+        f"&filter=createdTime<{end_ms}"
+        f"&filter=result=SUCCESS"
+        f"&filter=voided=false"
+        f"&expand=refunds"
+        f"&expand=order"
+    )
+    return paged_get(cfg, path)
+
+# Data fetch for orders (to get discounts)
+
+def get_orders(cfg, start_ms, end_ms):
+    mid = cfg["merchant_id"]
+    path = (
+        f"/v3/merchants/{mid}/orders"
+        f"?filter=createdTime>{start_ms}"
+        f"&filter=createdTime<{end_ms}"
+        f"&expand=discounts"
+    )
     return paged_get(cfg, path)
 
 # Metrics
@@ -101,6 +115,13 @@ def total_tax_cents(payments: list[dict]) -> int:
 
 def total_tips_cents(payments: list[dict]) -> int:
     return sum(p.get("tipAmount", 0) for p in payments)
+
+def total_discounts_cents(orders: list[dict]) -> int:
+    total = 0
+    for o in orders:
+        for d in o.get("discounts", {}).get("elements", []):
+            total += d.get("amount", 0)
+    return total
 
 # Listings
 
@@ -130,26 +151,35 @@ def main() -> None:
     parser.add_argument("-r", "--range",
                         choices=["today","yesterday","week","month"],
                         default="today",
-                        help="Date range for net-sales (default: today)")
+                        help="Date range for metrics (default: today)")
     parser.add_argument("-q","--query",
-                        choices=["sales","tax","tips"],
+                        choices=["sales","tax","tips","discounts"],
                         default="sales",
                         help="Metric to calculate (default: sales)")
     args = parser.parse_args()
     cfg = load_cfg(CONFIG_FILE)
+
     if args.list:
         list_resource(cfg,args.list)
         return
-    start_ms, end_ms, sd, ed = window(args.range)
-    payments = get_payments(cfg, start_ms, end_ms)
-    if args.query=="sales":
-        cents,label=net_sales_cents(payments),"Net sales"
-    elif args.query=="tax":
-        cents,label=total_tax_cents(payments),"Total tax"
-    else:
-        cents,label=total_tips_cents(payments),"Total tips"
-    label_date = sd.strftime("%Y-%m-%d") if sd == ed else f"{sd:%Y-%m-%d} → {ed:%Y-%m-%d}"
-    print(f"{label} (12 p.m.–midnight CT) for {label_date}: ${cents/100:,.2f}")
 
-if __name__=="__main__":
+    start_ms, end_ms, sd, ed = window(args.range)
+    if args.query == "discounts":
+        orders = get_orders(cfg, start_ms, end_ms)
+        cents, label = total_discounts_cents(orders), "Total discounts"
+    else:
+        payments = get_payments(cfg, start_ms, end_ms)
+        if args.query == "sales":
+            cents, label = net_sales_cents(payments), "Net sales"
+        elif args.query == "tax":
+            cents, label = total_tax_cents(payments), "Total tax"
+        elif args.query == "tips":
+            cents, label = total_tips_cents(payments), "Total tips"
+
+    date_lbl = sd.strftime("%Y-%m-%d") if sd == ed else f"{sd:%Y-%m-%d} → {ed:%Y-%m-%d}"
+    # Display absolute value so discounts appear positive
+    value = abs(cents) / 100
+    print(f"{label} (12 p.m.–midnight CT) for {date_lbl}: ${value:,.2f}")
+
+if __name__ == "__main__":
     main()
