@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-clover_net_sales.py  – Version 3 (discount endpoint fix, positive display)
+clover_net_sales.py  – Version 6 (sales excluding tax, employee tip breakdown)
 -----------------------------------------------------------------------
 • Net-metrics between 12 p.m. and 12 a.m. Central Time
   -r {today,yesterday,week,month}     (default: today)
   -q {sales,tax,tips,discounts}       (default: sales)
+  -d                                  (detailed breakdown - employee tips)
 
 • Quick listings
   -l {employees,discounts,items}
@@ -17,7 +18,9 @@ CONFIG  – ./config.json
   "base_url": "https://api.clover.com"
 }
 """
-import argparse, json, sys
+import argparse
+import json
+import sys
 from pathlib import Path
 from datetime import datetime, time, timedelta, date, timezone
 from zoneinfo import ZoneInfo
@@ -25,8 +28,8 @@ import requests
 
 # Constants
 CONFIG_FILE = Path(__file__).with_name("config.json")
-PAGE_LIMIT  = 1000
-CENTRAL_TZ  = ZoneInfo("America/Chicago")
+PAGE_LIMIT = 1000
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 
 # Helpers
 
@@ -55,12 +58,14 @@ def window(range_key: str):
     else:
         sys.exit(f"❌  Unknown range '{range_key}'.")
     start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
-    end_dt   = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
+    end_dt = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
     return epoch_ms(start_dt), epoch_ms(end_dt), s, e
 
 def paged_get(cfg: dict, path: str) -> list[dict]:
-    base, tok = cfg.get("base_url", "https://api.clover.com"), cfg["access_token"]
-    out, offset = [], 0
+    base = cfg.get("base_url", "https://api.clover.com")
+    tok = cfg["access_token"]
+    out = []
+    offset = 0
     while True:
         url = f"{base}{path}&limit={PAGE_LIMIT}&offset={offset}"
         r = requests.get(url, headers={"Authorization": f"Bearer {tok}"})
@@ -74,9 +79,8 @@ def paged_get(cfg: dict, path: str) -> list[dict]:
         offset += PAGE_LIMIT
     return out
 
-# Data fetch for payments
-
-def get_payments(cfg, start_ms, end_ms):
+# Data fetch
+def get_payments(cfg: dict, start_ms: int, end_ms: int) -> list[dict]:
     mid = cfg["merchant_id"]
     path = (
         f"/v3/merchants/{mid}/payments"
@@ -86,12 +90,12 @@ def get_payments(cfg, start_ms, end_ms):
         f"&filter=voided=false"
         f"&expand=refunds"
         f"&expand=order"
+        f"&expand=employee"
+        f"&expand=order.employee"
     )
     return paged_get(cfg, path)
 
-# Data fetch for orders (to get discounts)
-
-def get_orders(cfg, start_ms, end_ms):
+def get_orders(cfg: dict, start_ms: int, end_ms: int) -> list[dict]:
     mid = cfg["merchant_id"]
     path = (
         f"/v3/merchants/{mid}/orders"
@@ -101,14 +105,22 @@ def get_orders(cfg, start_ms, end_ms):
     )
     return paged_get(cfg, path)
 
-# Metrics
+# Employee mapping for human names
+def build_employee_map(cfg: dict) -> dict:
+    mid = cfg["merchant_id"]
+    employees = paged_get(cfg, f"/v3/merchants/{mid}/employees?")
+    return {e.get("id"): e.get("name", e.get("id")) for e in employees}
 
+# Metrics
 def net_sales_cents(payments: list[dict]) -> int:
     gross = sum(p.get("amount", 0) for p in payments)
-    refunds = sum(ref.get("amount", 0)
-                  for p in payments
-                  for ref in (p.get("refunds", {}).get("elements", []) if p.get("refunds") else []))
-    return gross - refunds
+    tax = sum(p.get("taxAmount", 0) for p in payments)
+    refunds = sum(
+        ref.get("amount", 0)
+        for p in payments
+        for ref in (p.get("refunds", {}).get("elements", []) if p.get("refunds") else [])
+    )
+    return gross - tax - refunds
 
 def total_tax_cents(payments: list[dict]) -> int:
     return sum(p.get("taxAmount", 0) for p in payments)
@@ -116,15 +128,24 @@ def total_tax_cents(payments: list[dict]) -> int:
 def total_tips_cents(payments: list[dict]) -> int:
     return sum(p.get("tipAmount", 0) for p in payments)
 
+def tips_by_employee(payments: list[dict], employee_map: dict) -> dict:
+    employee_tips = {}
+    for p in payments:
+        tip_amount = p.get("tipAmount", 0)
+        if tip_amount > 0:
+            emp_id = None
+            if p.get("employee") and isinstance(p["employee"], dict):
+                emp_id = p["employee"].get("id")
+            elif p.get("order") and p["order"].get("employee") and isinstance(p["order"]["employee"], dict):
+                emp_id = p["order"]["employee"].get("id")
+            emp_name = employee_map.get(emp_id, emp_id) if emp_id else "Unknown Employee"
+            employee_tips[emp_name] = employee_tips.get(emp_name, 0) + tip_amount
+    return employee_tips
+
 def total_discounts_cents(orders: list[dict]) -> int:
-    total = 0
-    for o in orders:
-        for d in o.get("discounts", {}).get("elements", []):
-            total += d.get("amount", 0)
-    return total
+    return sum(d.get("amount", 0) for o in orders for d in o.get("discounts", {}).get("elements", []))
 
 # Listings
-
 def list_resource(cfg: dict, resource: str) -> None:
     mid = cfg["merchant_id"]
     if resource == "employees":
@@ -138,32 +159,41 @@ def list_resource(cfg: dict, resource: str) -> None:
     rows = paged_get(cfg, path)
     print(f"{resource.capitalize()} ({len(rows)}):")
     for r in rows:
-        print(f"• {r.get(key)}   [{r.get('id')}]")
+        print(f"• {r.get(key)}   [{r.get('id')}] ")
 
 # Main
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Clover metrics & listing tool")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-l", "--list",
-                       choices=["employees","discounts","items"],
-                       help="List resources and exit")
+def main():
+    parser = argparse.ArgumentParser(
+        description="Clover net metrics (sales, tax, tips, discounts)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("-r", "--range",
+                        dest="range",
                         choices=["today","yesterday","week","month"],
                         default="today",
                         help="Date range for metrics (default: today)")
     parser.add_argument("-q","--query",
+                        dest="query",
                         choices=["sales","tax","tips","discounts"],
                         default="sales",
                         help="Metric to calculate (default: sales)")
+    parser.add_argument("-d", "--detail",
+                        action="store_true",
+                        help="Show detailed breakdown (employee breakdown for tips)")
+    parser.add_argument("-l","--list",
+                        choices=["employees","discounts","items"],
+                        help="Quick list of employees, discounts, or items")
     args = parser.parse_args()
+
     cfg = load_cfg(CONFIG_FILE)
 
+    # Quick list and exit
     if args.list:
-        list_resource(cfg,args.list)
+        list_resource(cfg, args.list)
         return
 
     start_ms, end_ms, sd, ed = window(args.range)
+
     if args.query == "discounts":
         orders = get_orders(cfg, start_ms, end_ms)
         cents, label = total_discounts_cents(orders), "Total discounts"
@@ -175,9 +205,21 @@ def main() -> None:
             cents, label = total_tax_cents(payments), "Total tax"
         elif args.query == "tips":
             cents, label = total_tips_cents(payments), "Total tips"
+            if args.detail:
+                employee_map = build_employee_map(cfg)
+                employee_tips = tips_by_employee(payments, employee_map)
+                print("\nBreakdown by employee:")
+                if employee_tips:
+                    for emp_name, tip_cents in sorted(employee_tips.items()):
+                        tip_value = tip_cents / 100
+                        print(f"• {emp_name}: ${tip_value:,.2f}")
+                else:
+                    print("• No tips recorded")
+                return
+        else:
+            sys.exit(f"❌  Unknown query '{args.query}'")
 
     date_lbl = sd.strftime("%Y-%m-%d") if sd == ed else f"{sd:%Y-%m-%d} → {ed:%Y-%m-%d}"
-    # Display absolute value so discounts appear positive
     value = abs(cents) / 100
     print(f"{label} (12 p.m.–midnight CT) for {date_lbl}: ${value:,.2f}")
 
