@@ -46,7 +46,16 @@ def sunday_of_week(d: date) -> date:
 
 def window(range_key: str):
     today = datetime.now(CENTRAL_TZ).date()
-    if range_key == "today":
+
+    # 1) if it's a ISO-date we'll treat it as a single-day range
+    try:
+        single = date.fromisoformat(range_key)
+    except ValueError:
+        single = None
+
+    if single:
+        s = e = single
+    elif range_key == "today":
         s = e = today
     elif range_key == "yesterday":
         s = e = today - timedelta(days=1)
@@ -56,7 +65,7 @@ def window(range_key: str):
     elif range_key == "month":
         s, e = today.replace(day=1), today
     else:
-        sys.exit(f"❌  Unknown range '{range_key}'.")
+        sys.exit(f"❌  Unknown range or bad date '{range_key}'.")
     start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
     end_dt = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
     return epoch_ms(start_dt), epoch_ms(end_dt), s, e
@@ -216,9 +225,11 @@ def main():
     )
     parser.add_argument("-r", "--range",
                         dest="range",
-                        choices=["today","yesterday","week","month"],
                         default="today",
-                        help="Date range (default: today)")
+                        help=(
+                            "Date range (today, yesterday, week, month) "
+                            "or a specific date YYYY-MM-DD"
+                        ))
     parser.add_argument("-q", "--query",
                         dest="query",
                         choices=["sales","tax","tips","discounts"],
