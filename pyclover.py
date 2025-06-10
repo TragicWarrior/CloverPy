@@ -3,7 +3,7 @@
 clover_net_sales.py  – Version 11 (sales excluding tax, employee tip & discount breakdown)
 -----------------------------------------------------------------------
 • Net-metrics between 12 p.m. and 12 a.m. Central Time
-  -r {today,yesterday,week,month}     (default: today)
+  -r {today,yesterday,week,month,last_week,last_month}     (default: today)
   -q {sales,tax,tips,discounts}       (default: sales)
   -d                                  (detailed breakdown - employee tips or discount names)
 
@@ -64,6 +64,19 @@ def window(range_key: str):
         e = today
     elif range_key == "month":
         s, e = today.replace(day=1), today
+
+    # Previous calendar week (Sunday→Saturday)
+    elif range_key == "last_week":
+        current_week_start = sunday_of_week(today)
+        s = current_week_start - timedelta(days=7)
+        e = current_week_start - timedelta(days=1)
+
+    # Previous calendar month
+    elif range_key == "last_month":
+        first_of_current = today.replace(day=1)
+        last_of_prev = first_of_current - timedelta(days=1)
+        s = last_of_prev.replace(day=1)
+        e = last_of_prev
     else:
         sys.exit(f"❌  Unknown range or bad date '{range_key}'.")
     start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
@@ -227,7 +240,7 @@ def main():
                         dest="range",
                         default="today",
                         help=(
-                            "Date range (today, yesterday, week, month) "
+                            "Date range (today, yesterday, week, month, last_week, last_month) "
                             "or a specific date YYYY-MM-DD"
                         ))
     parser.add_argument("-q", "--query",
