@@ -49,7 +49,15 @@ def sunday_of_week(d: date) -> date:
 def window(range_key: str):
     today = datetime.now(CENTRAL_TZ).date()
 
-    # Check if it's a year (YYYY format)
+    # Check if it's "year" (current year) or a year (YYYY format)
+    if range_key == "year":
+        year = today.year
+        s = date(year, 1, 1)
+        e = date(year, 12, 31)
+        start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
+        end_dt = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
+        return epoch_ms(start_dt), epoch_ms(end_dt), s, e, "year"
+    
     try:
         year = int(range_key)
         if 2000 <= year <= 2099:  # Reasonable year range
@@ -159,10 +167,6 @@ def get_payments(cfg: dict, start_ms: int, end_ms: int) -> list[dict]:
             chunk_start_ms = epoch_ms(chunk_start_dt)
             chunk_end_ms = epoch_ms(chunk_end_dt)
             
-            print(f"Fetching payments for {current_date.strftime('%Y-%m')}...")
-            print(f"  Chunk range: {chunk_start_ms} to {chunk_end_ms}")
-            print(f"  Date range: {current_date.strftime('%Y-%m-%d')} to {month_end.strftime('%Y-%m-%d')}")
-            
             path = (
                 f"/v3/merchants/{mid}/payments"
                 f"?filter=createdTime>={chunk_start_ms}"
@@ -176,7 +180,6 @@ def get_payments(cfg: dict, start_ms: int, end_ms: int) -> list[dict]:
             )
             
             chunk_payments = paged_get(cfg, path)
-            print(f"  Found {len(chunk_payments)} payments")
             all_payments.extend(chunk_payments)
             current_date = next_month_start
             
@@ -406,8 +409,6 @@ def sales_by_month(payments: list[dict], year: int) -> dict:
     """Break down sales by month for a year"""
     monthly_sales = defaultdict(int)
     
-    print(f"Debug: Processing {len(payments)} payments for year {year}")
-    
     for p in payments:
         created_time = p.get("createdTime")
         if not created_time:
@@ -415,10 +416,6 @@ def sales_by_month(payments: list[dict], year: int) -> dict:
             
         # Convert timestamp to Central Time
         dt = datetime.fromtimestamp(created_time / 1000, tz=timezone.utc).astimezone(CENTRAL_TZ)
-        
-        # Debug: Show first few payment dates
-        if len(monthly_sales) == 0:
-            print(f"Debug: First payment date: {dt.date()} at {dt.time()}")
         
         # Adjust for 12pm-12am window
         payment_date = dt.date()
@@ -439,7 +436,6 @@ def sales_by_month(payments: list[dict], year: int) -> dict:
         net_sales = gross - tax - refunds
         monthly_sales[payment_date.month] += net_sales
     
-    print(f"Debug: Found sales in {len(monthly_sales)} months")
     return monthly_sales
 
 # Listings
@@ -468,7 +464,7 @@ def main():
                         dest="range",
                         default="today",
                         help=(
-                            "Date range (today, yesterday, week, month, last_week, last_month, YYYY) "
+                            "Date range (today, yesterday, week, month, last_week, last_month, year, YYYY) "
                             "or a specific date YYYY-MM-DD"
                         ))
     parser.add_argument("-q", "--query",
@@ -541,8 +537,6 @@ def main():
                     return
                 elif range_type == "year":
                     # Year - show monthly breakdown
-                    print(f"Debug: Date range {sd} to {ed}")
-                    print(f"Debug: Timestamp range {start_ms} to {end_ms}")
                     monthly_breakdown = sales_by_month(payments, sd.year)
                     print(f"\nMonthly sales breakdown for {sd.year}:")
                     if monthly_breakdown:
