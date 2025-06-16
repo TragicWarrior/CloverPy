@@ -6,6 +6,7 @@ clover_net_sales.py  – Version 12 (sales excluding tax, employee tip & discoun
   -r {today,yesterday,week,month,last_week,last_month,YYYY}     (default: today)
   -q {sales,tax,tips,discounts}       (default: sales)
   -d                                  (detailed breakdown - employee tips, discount names, or sales by time)
+  -g                                  (graph mode - only valid with -d, requires termgraph library)
 
 • Quick listings
   -l {employees,discounts,items}
@@ -27,6 +28,8 @@ from zoneinfo import ZoneInfo
 import requests
 from collections import defaultdict
 import calendar
+import tempfile
+import subprocess
 
 # Constants
 CONFIG_FILE = Path(__file__).with_name("config.json")
@@ -45,6 +48,55 @@ def epoch_ms(dt: datetime) -> int:
 
 def sunday_of_week(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
+
+def create_termgraph(data: dict, title: str, value_suffix: str = "") -> None:
+    """Create and display a terminal graph using termgraph"""
+    try:
+        import termgraph
+    except ImportError:
+        print("\n❌  termgraph library not installed. Install with: pip install termgraph")
+        return
+    
+    if not data:
+        print(f"\n📊  No data available for {title}")
+        return
+    
+    # Create temporary data file for termgraph
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.dat', delete=False) as f:
+        temp_file = f.name
+        for label, value in data.items():
+            # Convert cents to dollars for display
+            dollar_value = abs(value) / 100 if isinstance(value, int) else abs(value)
+            # Replace spaces with underscores in labels to avoid parsing issues
+            safe_label = label.replace(" ", "_").replace("&", "and")
+            f.write(f"{safe_label} {dollar_value:.2f}\n")    
+    try:
+        print(f"\n📊  {title}")
+        print("=" * len(title))
+        
+        # Run termgraph with the temporary file
+        cmd = [
+            'termgraph', temp_file,
+            '--title', title,
+            '--suffix', f' ${value_suffix}' if value_suffix else ' $',
+            '--width', '50',
+            '--format', '{:.2f}'
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(result.stdout)
+        else:
+            print(f"❌  Error creating graph: {result.stderr}")
+            
+    except FileNotFoundError:
+        print("\n❌  termgraph command not found. Install with: pip install termgraph")
+    finally:
+        # Clean up temporary file
+        try:
+            Path(temp_file).unlink()
+        except:
+            pass
 
 def window(range_key: str):
     today = datetime.now(CENTRAL_TZ).date()
@@ -475,10 +527,17 @@ def main():
     parser.add_argument("-d", "--detail",
                         action="store_true",
                         help="Show detailed breakdown for tips, discounts, or sales by time")
+    parser.add_argument("-g", "--graph",
+                        action="store_true",
+                        help="Show graph visualization (requires -d flag and termgraph library)")
     parser.add_argument("-l", "--list",
                         choices=["employees","discounts","items"],
                         help="Quick list of employees, discounts, or items")
     args = parser.parse_args()
+
+    # Validate -g flag usage
+    if args.graph and not args.detail:
+        sys.exit("❌  Graph mode (-g) requires detail mode (-d)")
 
     cfg = load_cfg(CONFIG_FILE)
 
@@ -497,6 +556,10 @@ def main():
             if breakdown:
                 for name, cents in sorted(breakdown.items()):
                     print(f"• {name}: ${cents/100:,.2f}")
+                
+                # Show graph if requested
+                if args.graph:
+                    create_termgraph(breakdown, "Discount Breakdown")
             else:
                 print("• No discounts recorded")
             return
@@ -521,6 +584,23 @@ def main():
                             else:
                                 time_label = f"{hour}:00 AM"
                             print(f"• {time_label}: ${hourly_breakdown[hour]/100:,.2f}")
+                        
+                        # Show graph if requested
+                        if args.graph:
+                            # Create formatted labels for the graph
+                            graph_data = {}
+                            for hour in sorted(hourly_breakdown.keys()):
+                                if hour == 24:
+                                    time_label = "12AM"
+                                elif hour == 12:
+                                    time_label = "12PM"
+                                elif hour > 12:
+                                    time_label = f"{hour-12}PM"
+                                else:
+                                    time_label = f"{hour}AM"
+                                graph_data[time_label] = hourly_breakdown[hour]
+                            
+                            create_termgraph(graph_data, f"Hourly Sales - {sd.strftime('%Y-%m-%d')}")
                     else:
                         print("• No sales recorded during business hours")
                     return
@@ -532,6 +612,12 @@ def main():
                     if daily_breakdown:
                         for day in sorted(daily_breakdown.keys()):
                             print(f"• {day.strftime('%Y-%m-%d')}: ${daily_breakdown[day]/100:,.2f}")
+                        
+                        # Show graph if requested
+                        if args.graph:
+                            # Create formatted labels for the graph
+                            graph_data = {day.strftime('%m/%d'): value for day, value in daily_breakdown.items()}
+                            create_termgraph(graph_data, f"Daily Sales - {date_lbl}")
                     else:
                         print("• No sales recorded")
                     return
@@ -543,6 +629,12 @@ def main():
                         for month in sorted(monthly_breakdown.keys()):
                             month_name = calendar.month_name[month]
                             print(f"• {month_name}: ${monthly_breakdown[month]/100:,.2f}")
+                        
+                        # Show graph if requested
+                        if args.graph:
+                            # Create formatted labels for the graph
+                            graph_data = {calendar.month_abbr[month]: value for month, value in monthly_breakdown.items()}
+                            create_termgraph(graph_data, f"Monthly Sales - {sd.year}")
                     else:
                         print("• No sales recorded")
                     return
@@ -557,6 +649,10 @@ def main():
                 if breakdown:
                     for name, cents in sorted(breakdown.items()):
                         print(f"• {name}: ${cents/100:,.2f}")
+                    
+                    # Show graph if requested
+                    if args.graph:
+                        create_termgraph(breakdown, "Tips by Employee")
                 else:
                     print("• No tips recorded")
                 return
