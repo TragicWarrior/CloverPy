@@ -3,7 +3,7 @@
 clover_net_sales.py  – Version 12 (sales excluding tax, employee tip & discount breakdown + sales detail)
 -----------------------------------------------------------------------
 • Net-metrics between 12 p.m. and 12 a.m. Central Time
-  -r {today,yesterday,week,month,last_week,last_month,YYYY}     (default: today)
+  -r {today,yesterday,week,month,last_week,last_month,YYYY,YYYY-MM-DD:YYYY-MM-DD}     (default: today)
   -q {sales,tax,tips,discounts}       (default: sales)
   -d                                  (detailed breakdown - employee tips, discount names, or sales by time)
   -g                                  (graph mode - only valid with -d, requires termgraph library)
@@ -100,6 +100,22 @@ def create_termgraph(data: dict, title: str, value_suffix: str = "") -> None:
 
 def window(range_key: str):
     today = datetime.now(CENTRAL_TZ).date()
+
+    # Check for discrete date range format: YYYY-MM-DD:YYYY-MM-DD
+    if ':' in range_key:
+        try:
+            start_str, end_str = range_key.split(':', 1)
+            s = date.fromisoformat(start_str)
+            e = date.fromisoformat(end_str)
+            
+            if s > e:
+                sys.exit(f"❌  Start date ({s}) cannot be after end date ({e})")
+            
+            start_dt = datetime.combine(s, time(12, 0), tzinfo=CENTRAL_TZ)
+            end_dt = datetime.combine(e + timedelta(days=1), time(0, 0), tzinfo=CENTRAL_TZ)
+            return epoch_ms(start_dt), epoch_ms(end_dt), s, e, "range"
+        except ValueError as ex:
+            sys.exit(f"❌  Invalid date range format '{range_key}'. Use YYYY-MM-DD:YYYY-MM-DD. Error: {ex}")
 
     # Check if it's "year" (current year) or a year (YYYY format)
     if range_key == "year":
@@ -516,8 +532,8 @@ def main():
                         dest="range",
                         default="today",
                         help=(
-                            "Date range (today, yesterday, week, month, last_week, last_month, year, YYYY) "
-                            "or a specific date YYYY-MM-DD"
+                            "Date range (today, yesterday, week, month, last_week, last_month, year, YYYY, "
+                            "YYYY-MM-DD, or YYYY-MM-DD:YYYY-MM-DD for custom date ranges)"
                         ))
     parser.add_argument("-q", "--query",
                         dest="query",
