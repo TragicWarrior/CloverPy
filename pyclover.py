@@ -30,6 +30,7 @@ from collections import defaultdict
 import calendar
 import tempfile
 import subprocess
+import csv
 
 # Constants
 CONFIG_FILE = Path(__file__).with_name("config.json")
@@ -549,11 +550,17 @@ def main():
     parser.add_argument("-l", "--list",
                         choices=["employees","discounts","items"],
                         help="Quick list of employees, discounts, or items")
+    parser.add_argument("-o", "--output",
+                        metavar="FILENAME",
+                        help="Export detailed breakdown to CSV file (requires -d)")
     args = parser.parse_args()
 
     # Validate -g flag usage
     if args.graph and not args.detail:
         sys.exit("❌  Graph mode (-g) requires detail mode (-d)")
+    # Validate -o flag usage
+    if args.output and not args.detail:
+        sys.exit("❌  Output mode (-o) requires detail mode (-d)")
 
     cfg = load_cfg(CONFIG_FILE)
 
@@ -562,6 +569,14 @@ def main():
         return
 
     start_ms, end_ms, sd, ed, range_type = window(args.range)
+
+    def export_csv(data, headers, filename):
+        with open(filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(headers)
+            for row in data:
+                writer.writerow(row)
+        print(f"\n✅  Exported breakdown to {filename}")
 
     if args.query == "discounts":
         orders = get_orders(cfg, start_ms, end_ms)
@@ -572,7 +587,13 @@ def main():
             if breakdown:
                 for name, cents in sorted(breakdown.items()):
                     print(f"• {name}: ${cents/100:,.2f}")
-                
+                # Export to CSV if requested
+                if args.output:
+                    export_csv(
+                        [(name, f"{cents/100:.2f}") for name, cents in sorted(breakdown.items())],
+                        ["Discount Name", "Amount ($)"],
+                        args.output
+                    )
                 # Show graph if requested
                 if args.graph:
                     create_termgraph(breakdown, "Discount Breakdown")
@@ -588,7 +609,7 @@ def main():
                 if range_type == "day":
                     # Single day - show hourly breakdown
                     hourly_breakdown = sales_by_hour(payments, sd)
-                    print(f"\nHourly sales breakdown for {sd.strftime('%Y-%m-%d')}:")
+                    print(f"\nHourly sales breakdown for {sd.strftime('%Y-%m-%d')}:" )
                     if hourly_breakdown:
                         for hour in sorted(hourly_breakdown.keys()):
                             if hour == 24:
@@ -600,10 +621,21 @@ def main():
                             else:
                                 time_label = f"{hour}:00 AM"
                             print(f"• {time_label}: ${hourly_breakdown[hour]/100:,.2f}")
-                        
+                        # Export to CSV if requested
+                        if args.output:
+                            export_csv(
+                                [
+                                    ("12:00 PM" if hour == 12 else
+                                     "12:00 AM" if hour == 24 else
+                                     f"{hour-12}:00 PM" if hour > 12 else f"{hour}:00 AM",
+                                     f"{hourly_breakdown[hour]/100:.2f}")
+                                    for hour in sorted(hourly_breakdown.keys())
+                                ],
+                                ["Hour", "Net Sales ($)"],
+                                args.output
+                            )
                         # Show graph if requested
                         if args.graph:
-                            # Create formatted labels for the graph
                             graph_data = {}
                             for hour in sorted(hourly_breakdown.keys()):
                                 if hour == 24:
@@ -615,7 +647,6 @@ def main():
                                 else:
                                     time_label = f"{hour}AM"
                                 graph_data[time_label] = hourly_breakdown[hour]
-                            
                             create_termgraph(graph_data, f"Hourly Sales - {sd.strftime('%Y-%m-%d')}")
                     else:
                         print("• No sales recorded during business hours")
@@ -628,10 +659,18 @@ def main():
                     if daily_breakdown:
                         for day in sorted(daily_breakdown.keys()):
                             print(f"• {day.strftime('%Y-%m-%d')}: ${daily_breakdown[day]/100:,.2f}")
-                        
+                        # Export to CSV if requested
+                        if args.output:
+                            export_csv(
+                                [
+                                    (day.strftime('%Y-%m-%d'), f"{daily_breakdown[day]/100:.2f}")
+                                    for day in sorted(daily_breakdown.keys())
+                                ],
+                                ["Date", "Net Sales ($)"],
+                                args.output
+                            )
                         # Show graph if requested
                         if args.graph:
-                            # Create formatted labels for the graph
                             graph_data = {day.strftime('%m/%d'): value for day, value in daily_breakdown.items()}
                             create_termgraph(graph_data, f"Daily Sales - {date_lbl}")
                     else:
@@ -645,10 +684,18 @@ def main():
                         for month in sorted(monthly_breakdown.keys()):
                             month_name = calendar.month_name[month]
                             print(f"• {month_name}: ${monthly_breakdown[month]/100:,.2f}")
-                        
+                        # Export to CSV if requested
+                        if args.output:
+                            export_csv(
+                                [
+                                    (calendar.month_name[month], f"{monthly_breakdown[month]/100:.2f}")
+                                    for month in sorted(monthly_breakdown.keys())
+                                ],
+                                ["Month", "Net Sales ($)"],
+                                args.output
+                            )
                         # Show graph if requested
                         if args.graph:
-                            # Create formatted labels for the graph
                             graph_data = {calendar.month_abbr[month]: value for month, value in monthly_breakdown.items()}
                             create_termgraph(graph_data, f"Monthly Sales - {sd.year}")
                     else:
@@ -665,7 +712,13 @@ def main():
                 if breakdown:
                     for name, cents in sorted(breakdown.items()):
                         print(f"• {name}: ${cents/100:,.2f}")
-                    
+                    # Export to CSV if requested
+                    if args.output:
+                        export_csv(
+                            [(name, f"{cents/100:.2f}") for name, cents in sorted(breakdown.items())],
+                            ["Employee", "Tips ($)"],
+                            args.output
+                        )
                     # Show graph if requested
                     if args.graph:
                         create_termgraph(breakdown, "Tips by Employee")
