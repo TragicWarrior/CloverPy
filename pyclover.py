@@ -31,6 +31,13 @@ import calendar
 import tempfile
 import subprocess
 import csv
+from typing import Optional
+
+# ANSI color codes
+ANSI_RESET = '\033[0m'
+ANSI_GREEN = '\033[32m'
+ANSI_YELLOW = '\033[33m'
+ANSI_RED = '\033[31m'
 
 # Constants
 CONFIG_FILE = Path(__file__).with_name("config.json")
@@ -50,54 +57,45 @@ def epoch_ms(dt: datetime) -> int:
 def sunday_of_week(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
-def create_termgraph(data: dict, title: str, value_suffix: str = "") -> None:
-    """Create and display a terminal graph using termgraph"""
-    try:
-        import termgraph
-    except ImportError:
-        print("\n❌  termgraph library not installed. Install with: pip install termgraph")
-        return
-    
+def create_termgraph(data: dict, title: str, value_suffix: str = "", threshold: Optional[int] = None) -> None:
+    """Create and display a terminal bar graph using unicode full block (U+2587), with optional color thresholding."""
     if not data:
         print(f"\n📊  No data available for {title}")
         return
-    
-    # Create temporary data file for termgraph
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.dat', delete=False) as f:
-        temp_file = f.name
-        for label, value in data.items():
-            # Convert cents to dollars for display
-            dollar_value = abs(value) / 100 if isinstance(value, int) else abs(value)
-            # Replace spaces with underscores in labels to avoid parsing issues
-            safe_label = label.replace(" ", "_").replace("&", "and")
-            f.write(f"{safe_label} {dollar_value:.2f}\n")    
-    try:
-        print(f"\n📊  {title}")
-        print("=" * len(title))
-        
-        # Run termgraph with the temporary file
-        cmd = [
-            'termgraph', temp_file,
-            '--title', title,
-            '--suffix', f' ${value_suffix}' if value_suffix else ' $',
-            '--width', '50',
-            '--format', '{:.2f}'
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(result.stdout)
-        else:
-            print(f"❌  Error creating graph: {result.stderr}")
-            
-    except FileNotFoundError:
-        print("\n❌  termgraph command not found. Install with: pip install termgraph")
-    finally:
-        # Clean up temporary file
-        try:
-            Path(temp_file).unlink()
-        except:
-            pass
+
+    # Prepare data: convert cents to dollars if int, and get max label/value
+    processed = []
+    max_value = 0
+    for label, value in data.items():
+        dollar_value = abs(value) / 100 if isinstance(value, int) else abs(value)
+        processed.append((label, dollar_value))
+        if dollar_value > max_value:
+            max_value = dollar_value
+    if max_value == 0:
+        print(f"\n📊  No data available for {title}")
+        return
+
+    # Bar graph settings
+    max_bar_width = 50
+    shade = '\u2587'  # Unicode full block lower 7/8
+    label_width = max(len(str(label)) for label, _ in processed)
+    value_fmt = "{:.2f}"
+    suffix = f" {value_suffix}" if value_suffix else " $"
+
+    print(f"\n📊  {title}")
+    print("=" * len(title))
+    for label, value in processed:
+        bar_len = int((value / max_value) * max_bar_width)
+        bar = shade * bar_len
+        color = ''
+        if threshold is not None:
+            if value >= threshold:
+                color = ANSI_GREEN
+            elif value < 0.25 * threshold:
+                color = ANSI_RED
+            elif value < 0.5 * threshold:
+                color = ANSI_YELLOW
+        print(f"{label.ljust(label_width)} | {color}{bar.ljust(max_bar_width)}{ANSI_RESET} {value_fmt.format(value)}{suffix}")
 
 def window(range_key: str):
     today = datetime.now(CENTRAL_TZ).date()
@@ -546,13 +544,16 @@ def main():
                         help="Show detailed breakdown for tips, discounts, or sales by time")
     parser.add_argument("-g", "--graph",
                         action="store_true",
-                        help="Show graph visualization (requires -d flag and termgraph library)")
+                        help="Show graph visualization (requires -d flag)")
     parser.add_argument("-l", "--list",
                         choices=["employees","discounts","items"],
                         help="Quick list of employees, discounts, or items")
     parser.add_argument("-o", "--output",
                         metavar="FILENAME",
                         help="Export detailed breakdown to CSV file (requires -d)")
+    parser.add_argument("-t", "--threshold",
+                        type=int,
+                        help="Threshold for bar graph coloring (requires -d and -g)")
     args = parser.parse_args()
 
     # Validate -g flag usage
@@ -561,6 +562,12 @@ def main():
     # Validate -o flag usage
     if args.output and not args.detail:
         sys.exit("❌  Output mode (-o) requires detail mode (-d)")
+    # Validate -t flag usage
+    if args.threshold is not None:
+        if not (args.detail and args.graph):
+            sys.exit("❌  Threshold (-t) requires both detail (-d) and graph (-g) mode.")
+        if args.threshold < 0:
+            sys.exit("❌  Threshold (-t) must be a non-negative integer.")
 
     cfg = load_cfg(CONFIG_FILE)
 
@@ -596,7 +603,7 @@ def main():
                     )
                 # Show graph if requested
                 if args.graph:
-                    create_termgraph(breakdown, "Discount Breakdown")
+                    create_termgraph(breakdown, "Discount Breakdown", threshold=args.threshold)
             else:
                 print("• No discounts recorded")
             return
@@ -647,7 +654,7 @@ def main():
                                 else:
                                     time_label = f"{hour}AM"
                                 graph_data[time_label] = hourly_breakdown[hour]
-                            create_termgraph(graph_data, f"Hourly Sales - {sd.strftime('%Y-%m-%d')}")
+                            create_termgraph(graph_data, f"Hourly Sales - {sd.strftime('%Y-%m-%d')}", threshold=args.threshold)
                     else:
                         print("• No sales recorded during business hours")
                     return
@@ -672,7 +679,7 @@ def main():
                         # Show graph if requested
                         if args.graph:
                             graph_data = {day.strftime('%m/%d'): value for day, value in daily_breakdown.items()}
-                            create_termgraph(graph_data, f"Daily Sales - {date_lbl}")
+                            create_termgraph(graph_data, f"Daily Sales - {date_lbl}", threshold=args.threshold)
                     else:
                         print("• No sales recorded")
                     return
@@ -697,7 +704,7 @@ def main():
                         # Show graph if requested
                         if args.graph:
                             graph_data = {calendar.month_abbr[month]: value for month, value in monthly_breakdown.items()}
-                            create_termgraph(graph_data, f"Monthly Sales - {sd.year}")
+                            create_termgraph(graph_data, f"Monthly Sales - {sd.year}", threshold=args.threshold)
                     else:
                         print("• No sales recorded")
                     return
@@ -721,7 +728,7 @@ def main():
                         )
                     # Show graph if requested
                     if args.graph:
-                        create_termgraph(breakdown, "Tips by Employee")
+                        create_termgraph(breakdown, "Tips by Employee", threshold=args.threshold)
                 else:
                     print("• No tips recorded")
                 return
