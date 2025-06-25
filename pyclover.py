@@ -89,11 +89,14 @@ def create_termgraph(data: dict, title: str, value_suffix: str = "", threshold: 
         bar = shade * bar_len
         color = ''
         if threshold is not None:
-            if value >= threshold:
+            # Round for color logic to avoid floating point precision issues
+            v = round(value, 2)
+            t = round(threshold, 2)
+            if v >= t:
                 color = ANSI_GREEN
-            elif value < 0.25 * threshold:
+            elif v <= 0.25 * t:
                 color = ANSI_RED
-            elif value < 0.5 * threshold:
+            else:
                 color = ANSI_YELLOW
         print(f"{label.ljust(label_width)} | {color}{bar.ljust(max_bar_width)}{ANSI_RESET} {value_fmt.format(value)}{suffix}")
 
